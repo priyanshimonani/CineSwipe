@@ -11,7 +11,7 @@
  *  - Values are heuristic, NOT ground-truth labels.
  *  - Every feature is clamped to [0, 1].
  *  - Rating is intentionally excluded from the taste vector.
- *  - Mood/theme values are derived from genre combinations and overview
+ *  - Mood/theme values combine restrained genre evidence with title/overview
  *    keyword signals — easy to tune without touching anything else.
  *
  * Data flow:
@@ -51,14 +51,14 @@ const MOOD_KEYS = [
 ];
 
 // ─── Keyword signal groups ────────────────────────────────────────────────────
-// Each group is a list of lowercase substrings to search for in the overview.
+// Each group is a list of lowercase words/phrases to search for in text.
 // Tune these freely — they are the only text-matching heuristic we use.
 
 const KEYWORD_GROUPS = {
   melancholic: [
     'loss', 'grief', 'lonely', 'loneliness', 'sad', 'sorrow', 'struggle',
     'isolation', 'despair', 'heartbreak', 'tragedy', 'tragic', 'mourning',
-    'depression', 'depressed', 'regret', 'broken',
+    'depression', 'depressed', 'regret', 'broken', 'strained',
   ],
   nostalgic: [
     'memory', 'memories', 'past', 'childhood', 'youth', 'old', 'return',
@@ -66,7 +66,7 @@ const KEYWORD_GROUPS = {
   ],
   romantic: [
     'love', 'romance', 'relationship', 'couple', 'affair', 'heart',
-    'passion', 'lover', 'together', 'soulmate', 'wedding', 'date',
+    'passion', 'lover', 'together', 'soulmate', 'wedding', 'date', 'girl',
   ],
   feelGood: [
     'uplifting', 'inspiring', 'hope', 'hopeful', 'joy', 'happy',
@@ -76,12 +76,12 @@ const KEYWORD_GROUPS = {
   thoughtProvoking: [
     'identity', 'existence', 'reality', 'meaning', 'psychological',
     'consciousness', 'morality', 'philosophy', 'society', 'dystopia',
-    'truth', 'illusion', 'perception', 'question', 'complexity',
+    'truth', 'illusion', 'perception', 'question', 'complexity', 'sanity',
   ],
   intense: [
     'obsession', 'danger', 'survival', 'competition', 'revenge', 'fight',
     'battle', 'war', 'conflict', 'threat', 'terror', 'chase', 'violence',
-    'explosive', 'action-packed', 'adrenaline', 'crisis',
+    'explosive', 'action-packed', 'adrenaline', 'crisis', 'cut-throat',
   ],
   dark: [
     'murder', 'death', 'crime', 'dark', 'serial killer', 'killer',
@@ -94,30 +94,30 @@ const KEYWORD_GROUPS = {
     'warm', 'cozy',
   ],
   comingOfAge: [
-    'teen', 'teenager', 'teenager', 'young', 'school', 'high school',
-    'college', 'university', 'growing up', 'youth', 'adolescent',
+    'teen', 'teenager', 'school', 'high school', 'college', 'university',
+    'growing up', 'adolescent',
     'puberty', 'first love', 'coming of age', 'graduation',
   ],
 };
 
 // ─── Genre → mood contribution table ─────────────────────────────────────────
-// Specifies how a movie's genre membership boosts particular mood features.
-// Values represent the maximum contribution from this genre alone.
-// They are additive across genres and then clamped to [0, 1].
+// Genre evidence is intentionally restrained. A single broad genre should
+// guide a mood value without making it a strong label on its own.
 
 const GENRE_TO_MOOD = {
-  action:   { intense: 0.6, dark: 0.2, feelGood: 0.15 },
-  comedy:   { feelGood: 0.7, relaxing: 0.3, nostalgic: 0.1 },
-  crime:    { dark: 0.6, intense: 0.5, thoughtProvoking: 0.2 },
-  drama:    { melancholic: 0.35, thoughtProvoking: 0.4, romantic: 0.1 },
-  fantasy:  { relaxing: 0.25, feelGood: 0.2, thoughtProvoking: 0.15 },
-  horror:   { dark: 0.75, intense: 0.65 },
-  music:    { feelGood: 0.4, relaxing: 0.3, nostalgic: 0.2 },
-  mystery:  { dark: 0.35, thoughtProvoking: 0.4, intense: 0.25 },
-  romance:  { romantic: 0.8, feelGood: 0.3, nostalgic: 0.15 },
-  sciFi:    { thoughtProvoking: 0.5, intense: 0.25, dark: 0.15 },
-  'sci-fi': { thoughtProvoking: 0.5, intense: 0.25, dark: 0.15 },
-  thriller: { intense: 0.7, dark: 0.4, thoughtProvoking: 0.2 },
+  action:        { intense: 0.28, dark: 0.08 },
+  comedy:        { feelGood: 0.25, relaxing: 0.08, nostalgic: 0.05 },
+  crime:         { dark: 0.3, intense: 0.2, thoughtProvoking: 0.08 },
+  drama:         { melancholic: 0.12, thoughtProvoking: 0.15, romantic: 0.05 },
+  fantasy:       { relaxing: 0.1, feelGood: 0.1, thoughtProvoking: 0.08 },
+  horror:        { dark: 0.35, intense: 0.3 },
+  music:         { nostalgic: 0.08 },
+  mystery:       { dark: 0.18, thoughtProvoking: 0.2, intense: 0.12 },
+  romance:       { romantic: 0.35, feelGood: 0.08, nostalgic: 0.06 },
+  sciFi:         { thoughtProvoking: 0.2, intense: 0.08, dark: 0.08 },
+  'sci-fi':      { thoughtProvoking: 0.2, intense: 0.08, dark: 0.08 },
+  thriller:      { intense: 0.35, dark: 0.25, thoughtProvoking: 0.1 },
+  'coming-of-age': { comingOfAge: 0.45, nostalgic: 0.08 },
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -144,9 +144,32 @@ function keywordScore(text, keywords, saturateAt = 3) {
   if (!text) return 0;
   let hits = 0;
   for (const kw of keywords) {
-    if (text.includes(kw)) hits++;
+    const escapedKeyword = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`(^|\\s)${escapedKeyword}(?=\\s|$)`, 'i').test(text)) hits++;
   }
   return clamp(hits / saturateAt);
+}
+
+function getMovieText(movie) {
+  const keywordValues = Array.isArray(movie?.keywords)
+    ? movie.keywords
+        .map((keyword) => (typeof keyword === 'string' ? keyword : keyword?.name))
+        .filter(Boolean)
+    : [];
+
+  return [
+    movie?.title,
+    movie?.originalTitle,
+    movie?.original_title,
+    movie?.overview,
+    ...keywordValues,
+  ]
+    .filter((value) => typeof value === 'string')
+    .join(' ')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}-]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 // ─── Main export ──────────────────────────────────────────────────────────────
@@ -171,7 +194,11 @@ function keywordScore(text, keywords, saturateAt = 3) {
  */
 export function extractMovieFeatures(movie) {
   // Normalise genre slugs to lower-case for matching
-  const genreSet = new Set((movie.genres || []).map((g) => g.toLowerCase()));
+  const genreSet = new Set(
+    (Array.isArray(movie?.genres) ? movie.genres : [])
+      .filter((genre) => typeof genre === 'string')
+      .map((genre) => genre.toLowerCase())
+  );
 
   // ── 1. Genre features (binary) ────────────────────────────────
   const genreFeatures = {};
@@ -194,18 +221,20 @@ export function extractMovieFeatures(movie) {
     if (!contributions) continue;
     for (const [moodKey, amount] of Object.entries(contributions)) {
       if (moodAccum[moodKey] !== undefined) {
-        moodAccum[moodKey] += amount;
+        moodAccum[moodKey] = clamp(moodAccum[moodKey] + amount);
       }
     }
   }
 
-  // 2b. Keyword-based contributions from the overview
-  const overviewText = (movie.overview || '').toLowerCase();
+  // 2b. Text-based evidence from title, overview, and optional keyword fields
+  const movieText = getMovieText(movie);
 
   for (const [moodKey, keywords] of Object.entries(KEYWORD_GROUPS)) {
     if (moodAccum[moodKey] !== undefined) {
-      const kwBoost = keywordScore(overviewText, keywords, 3) * 0.4;
-      moodAccum[moodKey] += kwBoost;
+      const textEvidence = keywordScore(movieText, keywords, 3) * 0.65;
+      // Independent evidence combines with diminishing returns rather than
+      // simply adding genre and keyword scores.
+      moodAccum[moodKey] = 1 - ((1 - moodAccum[moodKey]) * (1 - textEvidence));
     }
   }
 

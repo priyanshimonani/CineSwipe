@@ -8,6 +8,7 @@ import { scoreCandidates } from './ml/scoreCandidates';
 import { updateUserVector } from './ml/updateUserVector';
 import { createInitialUserVector } from './ml/userVector';
 import { movieToVector } from './ml/vectorize';
+import MLInspector from './components/MLInspector';
 import './App.css';
 
 const TOTAL_SWIPES = 10;
@@ -57,6 +58,9 @@ function App() {
   const [swipeHistory, setSwipeHistory] = useState([]);
   const [, setWatchlist] = useState([]);
   const [userVector, setUserVector] = useState([]);
+  const [rankedCandidates, setRankedCandidates] = useState([]);
+  const [lastSwipe, setLastSwipe] = useState(null);
+  const [isInspectorOpen, setIsInspectorOpen] = useState(false);
 
   // A key that changes each swipe so React fully remounts the MovieCard
   const [cardKey, setCardKey] = useState(0);
@@ -132,6 +136,8 @@ function App() {
         candidatePoolRef.current = nextCandidatePool;
         setCurrentMovie(initialMovie);
         setUserVector(initialVector);
+        setRankedCandidates(ranked);
+        setLastSwipe(null);
         setSwipeHistory([]);
         setWatchlist([]);
         setCardKey((k) => k + 1);
@@ -226,6 +232,14 @@ function App() {
         rankedCandidates: [],
         nextMovie: null,
       });
+      setLastSwipe({
+        action: direction,
+        beforeVector: userVector.slice(),
+        afterVector: updatedVector.slice(),
+        beforeRanking: rankedCandidates,
+        afterRanking: [],
+      });
+      setRankedCandidates([]);
       setCurrentScreen('complete');
     } else {
       const ranked = scoreCandidates(updatedVector, activePool.getAvailable());
@@ -240,6 +254,14 @@ function App() {
         rankedCandidates: ranked,
         nextMovie,
       });
+      setLastSwipe({
+        action: direction,
+        beforeVector: userVector.slice(),
+        afterVector: updatedVector.slice(),
+        beforeRanking: rankedCandidates,
+        afterRanking: ranked,
+      });
+      setRankedCandidates(ranked);
 
       if (!nextMovie) {
         if (import.meta.env.DEV) {
@@ -270,6 +292,9 @@ function App() {
     setWatchlist([]);
     setCurrentMovie(null);
     setUserVector([]);
+    setRankedCandidates([]);
+    setLastSwipe(null);
+    setIsInspectorOpen(false);
     candidatePoolRef.current = null;
     setSelectedMoods([]);
     setMoodError('');
@@ -346,6 +371,15 @@ function App() {
       {/* Swipe Deck */}
       {currentScreen === 'swipe-deck' && currentMovie && (
         <div className="swipe-screen">
+          {import.meta.env.DEV && (
+            <button
+              className="secondary-btn ml-inspector-toggle"
+              onClick={() => setIsInspectorOpen((open) => !open)}
+              type="button"
+            >
+              {isInspectorOpen ? 'Hide ML Inspector' : 'ML Inspector'}
+            </button>
+          )}
           <p className="swipe-progress">
             {swipeCount + 1} / {TOTAL_SWIPES}
           </p>
@@ -362,6 +396,18 @@ function App() {
             <span className="hint hint-right">Like</span>
           </div>
         </div>
+      )}
+
+      {import.meta.env.DEV && isInspectorOpen && (
+        <MLInspector
+          currentMovie={currentMovie}
+          selectedMoods={selectedMoods}
+          swipeCount={swipeCount}
+          userVector={userVector}
+          availableCandidates={rankedCandidates.map(({ movie }) => movie)}
+          lastSwipe={lastSwipe}
+          onClose={() => setIsInspectorOpen(false)}
+        />
       )}
 
       {/* Completion */}
