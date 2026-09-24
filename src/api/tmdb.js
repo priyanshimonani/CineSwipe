@@ -80,6 +80,7 @@ export function getPosterUrl(posterPath) {
  * @param {number[]} options.genreIds   - TMDB genre IDs to filter by
  * @param {string[]} options.keywordIds - TMDB keyword IDs to filter by
  * @param {number}   options.page       - Page number (default 1)
+ * @param {number}   options.pageCount  - Number of sequential pages to fetch
  * @returns {Promise<Object>} Raw TMDB response
  */
 async function discoverMovies({
@@ -148,16 +149,13 @@ async function discoverMovies({
   return data;
 }
 
-async function fetchRetrievalLevel(level, options) {
-  const [page1, page2] = await Promise.all([
-    discoverMovies({ ...options, page: 1 }),
-    discoverMovies({ ...options, page: 2 }),
-  ]);
-
-  const rawResults = [
-    ...(page1.results || []),
-    ...(page2.results || []),
-  ];
+async function fetchRetrievalLevel(level, options, startPage = 1, pageCount = 2) {
+  const pages = await Promise.all(
+    Array.from({ length: pageCount }, (_, index) =>
+      discoverMovies({ ...options, page: startPage + index })
+    )
+  );
+  const rawResults = pages.flatMap((page) => page.results || []);
 
   if (import.meta.env.DEV) {
     console.log('[CineSwipe TMDB] candidate retrieval attempt', {
@@ -215,9 +213,13 @@ function transformMovie(tmdbMovie) {
  * entries removed.
  *
  * @param {string[]} selectedIds - Array of mood/genre IDs from MoodSelector
+ * @param {{startPage?: number, pageCount?: number}} options - Page window for this batch
  * @returns {Promise<Object[]>} Array of internal movie objects
  */
-export async function fetchMoviePool(selectedIds) {
+export async function fetchMoviePool(
+  selectedIds,
+  { startPage = 1, pageCount = 2 } = {}
+) {
   // Split selections into TMDB genres vs custom moods
   const genreIds = [];
   const keywordIds = [];
@@ -274,7 +276,12 @@ export async function fetchMoviePool(selectedIds) {
 
   let retrievalLevel = 'none';
   for (const level of levelsToTry) {
-    const rawResults = await fetchRetrievalLevel(level.name, level.options);
+    const rawResults = await fetchRetrievalLevel(
+      level.name,
+      level.options,
+      startPage,
+      pageCount
+    );
     let addedCount = 0;
 
     for (const raw of rawResults) {

@@ -106,6 +106,7 @@ export default function MLInspector({
   swipeCount,
   userVector,
   availableCandidates,
+  candidatePoolStats,
   lastSwipe,
   onClose,
 }) {
@@ -187,6 +188,29 @@ export default function MLInspector({
           </section>
         </>
       )}
+
+      <section className="ml-inspector-section">
+        <h3>Candidate pool</h3>
+        <p className="ml-inspector-meta">TMDB supplied candidates; CineSwipe ML ranks them.</p>
+        <div className="ml-inspector-pool-stats">
+          <span>Available: <strong>{candidatePoolStats.available}</strong></span>
+          <span>Consumed: <strong>{candidatePoolStats.consumed}</strong></span>
+        </div>
+        {candidatePoolStats.lastReplenishment && (
+          <div className="ml-inspector-replenishment">
+            <h4>Last replenishment</h4>
+            <p className="ml-inspector-meta">
+              Fetched: {candidatePoolStats.lastReplenishment.fetched} · Added:{' '}
+              {candidatePoolStats.lastReplenishment.added} · Duplicates:{' '}
+              {candidatePoolStats.lastReplenishment.duplicates}
+            </p>
+          </div>
+        )}
+        <CandidateRanking title="Current top candidates" candidates={currentRanking} />
+        <p className="ml-inspector-meta">
+          The highest-scoring available candidate is selected next.
+        </p>
+      </section>
 
       <section className="ml-inspector-section">
         <h3>Swipe effect</h3>

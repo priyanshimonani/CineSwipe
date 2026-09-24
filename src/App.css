@@ -807,6 +807,18 @@ body {
   font-weight: 800;
 }
 
+.ml-inspector-pool-stats {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.ml-inspector-pool-stats strong {
+  color: var(--text-primary);
+}
+
 .ml-inspector-ranking-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
