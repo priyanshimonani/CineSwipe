@@ -1,11 +1,46 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import MoodSelector from './components/MoodSelector';
 import MovieCard from './components/MovieCard';
 import SwipeControls from './components/SwipeControls';
 import { fetchMoviePool } from './api/tmdb';
+import { createCandidatePool } from './ml/candidatePool';
+import { scoreCandidates } from './ml/scoreCandidates';
+import { updateUserVector } from './ml/updateUserVector';
+import { createInitialUserVector } from './ml/userVector';
+import { movieToVector } from './ml/vectorize';
 import './App.css';
 
 const TOTAL_SWIPES = 10;
+
+function logRecommendationCycle({
+  selectedMoods,
+  currentMovie,
+  action = null,
+  userVectorBefore,
+  userVectorAfter,
+  rankedCandidates,
+  nextMovie,
+}) {
+  if (!import.meta.env.DEV) return;
+
+  console.log('[CineSwipe ML] recommendation cycle', {
+    selectedMoods: [...selectedMoods],
+    currentMovie: currentMovie
+      ? { title: currentMovie.title, id: currentMovie.id }
+      : null,
+    swipeAction: action,
+    userVectorBefore: [...userVectorBefore],
+    userVectorAfter: [...userVectorAfter],
+    top3RemainingCandidates: rankedCandidates.slice(0, 3).map(({ movie, score }) => ({
+      title: movie.title,
+      id: movie.id,
+      score: Number(score.toFixed(4)),
+    })),
+    selectedNextMovie: nextMovie
+      ? { title: nextMovie.title, id: nextMovie.id }
+      : null,
+  });
+}
 
 function App() {
   // Screen flow: 'landing' | 'mood-selection' | 'loading' | 'error' | 'empty' | 'swipe-deck' | 'complete'
@@ -15,13 +50,13 @@ function App() {
   const [selectedMoods, setSelectedMoods] = useState([]);
   const [moodError, setMoodError] = useState('');
 
-  // Movie pool (populated from TMDB)
-  const [moviePool, setMoviePool] = useState([]);
+  const candidatePoolRef = useRef(null);
 
   // Swipe deck state
-  const [currentMovieIndex, setCurrentMovieIndex] = useState(0);
+  const [currentMovie, setCurrentMovie] = useState(null);
   const [swipeHistory, setSwipeHistory] = useState([]);
-  const [watchlist, setWatchlist] = useState([]);
+  const [, setWatchlist] = useState([]);
+  const [userVector, setUserVector] = useState([]);
 
   // A key that changes each swipe so React fully remounts the MovieCard
   const [cardKey, setCardKey] = useState(0);
@@ -50,17 +85,66 @@ function App() {
     setCurrentScreen('loading');
     try {
       const pool = await fetchMoviePool(moodIds);
+      if (import.meta.env.DEV) {
+        console.log('[CineSwipe ML] initial candidate load', {
+          selectedMoods: [...moodIds],
+          initialCandidateCount: pool.length,
+          replenishmentRequested: false,
+        });
+      }
+
       if (pool.length === 0) {
+        if (import.meta.env.DEV) {
+          console.warn('[CineSwipe ML] no movies found', {
+            reason: 'initial candidate pool was empty after TMDB filtering',
+            swipeCount: 0,
+            candidatePoolSize: 0,
+            replenishmentRequested: false,
+          });
+        }
         setCurrentScreen('empty');
       } else {
-        setMoviePool(pool);
-        setCurrentMovieIndex(0);
+        const initialVector = createInitialUserVector(moodIds);
+        const nextCandidatePool = createCandidatePool(pool);
+        const ranked = scoreCandidates(
+          initialVector,
+          nextCandidatePool.getAvailable()
+        );
+        const initialMovie = ranked[0]?.movie || null;
+
+        if (import.meta.env.DEV) {
+          console.log('[CineSwipe ML] initial candidate pool state', {
+            candidatePoolSize: nextCandidatePool.size(),
+            rankedCandidateCount: ranked.length,
+            replenishmentRequested: false,
+          });
+        }
+
+        logRecommendationCycle({
+          selectedMoods: moodIds,
+          currentMovie: initialMovie,
+          userVectorBefore: initialVector,
+          userVectorAfter: initialVector,
+          rankedCandidates: ranked,
+          nextMovie: initialMovie,
+        });
+
+        candidatePoolRef.current = nextCandidatePool;
+        setCurrentMovie(initialMovie);
+        setUserVector(initialVector);
         setSwipeHistory([]);
         setWatchlist([]);
         setCardKey((k) => k + 1);
-        setCurrentScreen('swipe-deck');
+        setCurrentScreen(ranked.length > 0 ? 'swipe-deck' : 'empty');
       }
-    } catch {
+    } catch (error) {
+      if (import.meta.env.DEV) {
+        console.error('[CineSwipe ML] movie load failed', {
+          reason: 'TMDB request or movie transformation failed',
+          message: error instanceof Error ? error.message : 'Unknown error',
+          noMoviesFoundScreen: false,
+        });
+      }
       setCurrentScreen('error');
     }
   }, []);
@@ -80,12 +164,12 @@ function App() {
   };
 
   // ─── Swipe Deck ──────────────────────────────────────────────
-  const currentMovie = moviePool[currentMovieIndex];
   const swipeCount = swipeHistory.length;
   const isRoundComplete = swipeCount >= TOTAL_SWIPES;
 
   const handleSwipe = (direction) => {
-    if (!currentMovie || isRoundComplete) return;
+    const activePool = candidatePoolRef.current;
+    if (!currentMovie || !activePool || isRoundComplete) return;
 
     const entry = { movieId: currentMovie.id, action: direction };
     const newHistory = [...swipeHistory, entry];
@@ -95,11 +179,84 @@ function App() {
       setWatchlist((prev) => [...prev, currentMovie]);
     }
 
+    const poolSizeBeforeConsume = activePool.size();
+    activePool.consume(currentMovie.id);
+    const poolSizeAfterConsume = activePool.size();
+
+    if (import.meta.env.DEV) {
+      console.log('[CineSwipe ML] candidate pool consumption', {
+        movie: { title: currentMovie.title, id: currentMovie.id },
+        swipeAction: direction,
+        swipeCount: newHistory.length,
+        candidatePoolSizeBeforeConsume: poolSizeBeforeConsume,
+        candidatePoolSizeAfterConsume: poolSizeAfterConsume,
+        replenishmentRequested: false,
+      });
+    }
+
+    const updatedVector =
+      direction === 'right' || direction === 'left'
+        ? updateUserVector(
+            userVector,
+            Array.isArray(currentMovie.vector)
+              ? currentMovie.vector
+              : movieToVector(currentMovie),
+            direction
+          )
+        : userVector.slice();
+
+    setUserVector(updatedVector);
+
     if (newHistory.length >= TOTAL_SWIPES) {
+      if (import.meta.env.DEV) {
+        console.log('[CineSwipe ML] recommendation cycle ended', {
+          reason: '10-swipe round complete',
+          swipeCount: newHistory.length,
+          candidatePoolSize: activePool.size(),
+          noMoviesFoundScreen: false,
+          replenishmentRequested: false,
+        });
+      }
+      logRecommendationCycle({
+        selectedMoods,
+        currentMovie,
+        action: direction,
+        userVectorBefore: userVector,
+        userVectorAfter: updatedVector,
+        rankedCandidates: [],
+        nextMovie: null,
+      });
       setCurrentScreen('complete');
     } else {
-      setCurrentMovieIndex((prev) => prev + 1);
-      setCardKey((prev) => prev + 1);
+      const ranked = scoreCandidates(updatedVector, activePool.getAvailable());
+      const nextMovie = ranked[0]?.movie || null;
+
+      logRecommendationCycle({
+        selectedMoods,
+        currentMovie,
+        action: direction,
+        userVectorBefore: userVector,
+        userVectorAfter: updatedVector,
+        rankedCandidates: ranked,
+        nextMovie,
+      });
+
+      if (!nextMovie) {
+        if (import.meta.env.DEV) {
+          console.warn('[CineSwipe ML] recommendation pool exhausted', {
+            reason: 'candidate pool became empty before 10 swipes',
+            swipeCount: newHistory.length,
+            candidatePoolSize: activePool.size(),
+            noMoviesFoundScreen: false,
+            replenishmentRequested: false,
+          });
+        }
+        setCurrentMovie(null);
+        setCurrentScreen('complete');
+      } else {
+        setCurrentMovie(nextMovie);
+        setCardKey((prev) => prev + 1);
+      }
     }
   };
 
@@ -111,8 +268,9 @@ function App() {
   const handleStartOver = () => {
     setSwipeHistory([]);
     setWatchlist([]);
-    setMoviePool([]);
-    setCurrentMovieIndex(0);
+    setCurrentMovie(null);
+    setUserVector([]);
+    candidatePoolRef.current = null;
     setSelectedMoods([]);
     setMoodError('');
     setCardKey(0);

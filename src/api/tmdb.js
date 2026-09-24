@@ -12,6 +12,7 @@ const IMAGE_BASE = 'https://image.tmdb.org/t/p';
 
 // Poster size used throughout the app (good balance of quality & speed)
 const POSTER_SIZE = '/w500';
+const TARGET_CANDIDATE_COUNT = 10;
 
 /**
  * Mapping from our genre IDs (used in moods.js) to TMDB genre IDs.
@@ -81,16 +82,28 @@ export function getPosterUrl(posterPath) {
  * @param {number}   options.page       - Page number (default 1)
  * @returns {Promise<Object>} Raw TMDB response
  */
-async function discoverMovies({ genreIds = [], keywordIds = [], page = 1 } = {}) {
+async function discoverMovies({
+  genreIds = [],
+  keywordIds = [],
+  page = 1,
+  voteAverageGte,
+  voteCountGte,
+} = {}) {
   const params = new URLSearchParams({
     include_adult: 'false',
     include_video: 'false',
     language: 'en-US',
     sort_by: 'vote_count.desc',
-    'vote_average.gte': '6',
-    'vote_count.gte': '200',
     page: String(page),
   });
+
+  if (voteAverageGte !== undefined) {
+    params.set('vote_average.gte', String(voteAverageGte));
+  }
+
+  if (voteCountGte !== undefined) {
+    params.set('vote_count.gte', String(voteCountGte));
+  }
 
   if (genreIds.length > 0) {
     params.set('with_genres', genreIds.join('|'));
@@ -101,13 +114,59 @@ async function discoverMovies({ genreIds = [], keywordIds = [], page = 1 } = {})
   }
 
   const url = `${BASE_URL}/discover/movie?${params.toString()}`;
+
+  if (import.meta.env.DEV) {
+    console.log('[CineSwipe TMDB] discover request parameters', {
+      genreIds: [...genreIds],
+      keywordIds: [...keywordIds],
+      includeAdult: params.get('include_adult'),
+      includeVideo: params.get('include_video'),
+      language: params.get('language'),
+      sortBy: params.get('sort_by'),
+      voteAverageGte: params.get('vote_average.gte'),
+      voteCountGte: params.get('vote_count.gte'),
+      page: params.get('page'),
+    });
+    console.log('[CineSwipe TMDB] discover request URL (auth redacted)', url);
+  }
+
   const res = await fetch(url, { headers: headers() });
 
   if (!res.ok) {
     throw new Error(`TMDB request failed (${res.status})`);
   }
 
-  return res.json();
+  const data = await res.json();
+
+  if (import.meta.env.DEV) {
+    console.log('[CineSwipe TMDB] discover result', {
+      page,
+      resultCount: Array.isArray(data.results) ? data.results.length : 0,
+    });
+  }
+
+  return data;
+}
+
+async function fetchRetrievalLevel(level, options) {
+  const [page1, page2] = await Promise.all([
+    discoverMovies({ ...options, page: 1 }),
+    discoverMovies({ ...options, page: 2 }),
+  ]);
+
+  const rawResults = [
+    ...(page1.results || []),
+    ...(page2.results || []),
+  ];
+
+  if (import.meta.env.DEV) {
+    console.log('[CineSwipe TMDB] candidate retrieval attempt', {
+      level,
+      resultCount: rawResults.length,
+    });
+  }
+
+  return rawResults;
 }
 
 // ─── Transformation ──────────────────────────────────────────
@@ -171,27 +230,82 @@ export async function fetchMoviePool(selectedIds) {
     }
   }
 
-  // Fetch two pages to get a larger pool for randomization
-  const [page1, page2] = await Promise.all([
-    discoverMovies({ genreIds, keywordIds, page: 1 }),
-    discoverMovies({ genreIds, keywordIds, page: 2 }),
-  ]);
+  if (import.meta.env.DEV) {
+    console.log('[CineSwipe TMDB] selected mood IDs', {
+      selectedMoodIds: [...selectedIds],
+      genreIds: [...genreIds],
+      keywordIds: [...keywordIds],
+    });
+  }
 
-  const rawResults = [
-    ...(page1.results || []),
-    ...(page2.results || []),
+  const retrievalLevels = [
+    {
+      name: 'targeted',
+      options: { genreIds, keywordIds, voteAverageGte: 6, voteCountGte: 200 },
+    },
+    {
+      name: 'genre-no-keyword',
+      options: { genreIds, keywordIds: [], voteAverageGte: 6, voteCountGte: 200 },
+    },
+    {
+      name: 'genre-relaxed-quality',
+      options: { genreIds, keywordIds: [], voteAverageGte: 5, voteCountGte: 50 },
+    },
+    {
+      name: 'broad-genre',
+      options: { genreIds, keywordIds: [] },
+    },
+    {
+      name: 'broad-discovery',
+      options: { genreIds: [], keywordIds: [] },
+    },
   ];
 
-  // Transform, filter out poster-less movies, deduplicate
-  const seen = new Set();
-  const pool = [];
+  const levelsToTry = genreIds.length > 0
+    ? retrievalLevels
+    : retrievalLevels.filter(({ name }) => (
+      name === 'targeted' ||
+      name === 'genre-no-keyword' ||
+      name === 'broad-discovery'
+    ));
 
-  for (const raw of rawResults) {
-    const movie = transformMovie(raw);
-    if (movie.poster && !seen.has(movie.id)) {
-      seen.add(movie.id);
-      pool.push(movie);
+  const pool = [];
+  const seen = new Set();
+
+  let retrievalLevel = 'none';
+  for (const level of levelsToTry) {
+    const rawResults = await fetchRetrievalLevel(level.name, level.options);
+    let addedCount = 0;
+
+    for (const raw of rawResults) {
+      const movie = transformMovie(raw);
+      if (movie.poster && !seen.has(movie.id)) {
+        seen.add(movie.id);
+        pool.push(movie);
+        addedCount++;
+      }
     }
+
+    if (import.meta.env.DEV) {
+      console.log('[CineSwipe TMDB] candidate filtering', {
+        rawResultCount: rawResults.length,
+        candidateCount: pool.length,
+        addedCandidateCount: addedCount,
+        posterlessOrDuplicateCount: rawResults.length - addedCount,
+      });
+    }
+
+    retrievalLevel = level.name;
+    if (pool.length >= TARGET_CANDIDATE_COUNT) break;
+  }
+
+  if (import.meta.env.DEV) {
+    console.log('[CineSwipe TMDB] candidate retrieval completed', {
+      selectedMoodIds: [...selectedIds],
+      retrievalLevel,
+      finalCandidateCount: pool.length,
+      uniqueCandidateCount: seen.size,
+    });
   }
 
   // Shuffle using Fisher-Yates
